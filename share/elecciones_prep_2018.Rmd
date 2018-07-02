@@ -1,0 +1,207 @@
+---
+title: ""
+author: "R. Pacheco"
+date: "Julio 01, 2018"
+output: html_document
+---
+```{r , echo=FALSE, warning=FALSE, message=FALSE}
+library(rgdal)
+library(leaflet)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(htmlwidgets)
+
+distr = readOGR(dsn = '/home/pacheco/Documents/R/elecciones2018/layer', layer = 'distr', verbose = FALSE)
+ent = readOGR(dsn = '/home/pacheco/Documents/R/elecciones2018/layer', layer = 'ent', verbose = FALSE)
+
+distr_data_orig = distr@data #dataframe original de poligonos distritales
+entidad_id = ent@data[,c(3,4)]
+entidad_id$entidad =as.numeric(as.character(entidad_id$entidad))
+entidad_id$nombre = as.character(entidad_id$nombre)
+
+
+prep_presi = read.csv(paste('/home/pacheco/Documents/R/elecciones2018/',dir(path ='/home/pacheco/Documents/R/elecciones2018', pattern ='presidencia'),'/', 'presidencia.csv', sep = '')[1], skip = 6, header = T, sep = "|") #Lee desde la fila 5 del archivo por los encabezaos de informacion
+candidaturas_prep = read.csv(paste('/home/pacheco/Documents/R/elecciones2018/', dir(path ='/home/pacheco/Documents/R/elecciones2018', pattern ='presidencia'),'/', 'presidencia_candidaturas_2018.csv', sep = '')[1], skip = 1, header = T, sep = "|")
+
+prep_presi = gather(prep_presi, key = 'partido',value = 'votos', PAN:NULOS) #colapsa columnas de partidos en una con nombre "partidos" y otra col de votos
+
+#Crea columna con las iniciales del candidato. str_detect checa palabras que contengan las inicialees de partidos con mismo candidato y otorga en otra columna las iniciales del candidato
+prep_presi$candidato = ifelse(str_detect(prep_presi$partido,"MORENA|PT|PES"),'AMLO',
+                          ifelse(str_detect(prep_presi$partido, "PRI|PVEM|PANAL"), 'JAMK',
+                                 ifelse(str_detect(prep_presi$partido, "PAN$|PRD|MC"),'RAC',
+                                        ifelse(str_detect(prep_presi$partido, "CAND_IND_02"),'JHRC',
+                                               ifelse(str_detect(prep_presi$partido, "NULOS|CAND_IND_01"),'NULOS',
+                                                        ifelse(str_detect(prep_presi$partido, "NO_REGIST"),'NO REGISTRO','ERROR'))))))
+##palabra|palabra| busca las dos
+## ^palabra despues
+## palabra$ antes
+## [:alpha:]
+prep_presi$votos = as.numeric(prep_presi$votos) #Convierte a numericos y NA a los NO numericos
+prep_presi$votos = ifelse(is.na(prep_presi$votos),0,prep_presi$votos) #Convierte NA a 0
+prep_presi$votos = as.numeric(prep_presi$votos) #Convierte nuevamente a numericos
+
+#Suma de votos por entidad, distrito y candidato
+prep_votos_dis_cand = prep_presi %>% 
+  group_by(ID_ESTADO,ID_DISTRITO_FEDERAL,candidato) %>%
+  summarise(voto = sum(votos))
+
+#Suma de votos por entidad y distrito
+prep_votos_dis_tot = prep_presi %>% 
+  group_by(ID_ESTADO,ID_DISTRITO_FEDERAL) %>%
+  summarise(voto_t = sum(votos))
+
+#Unir la suma de votos por candidato y por total de distrito
+prep_dis_presi = left_join(prep_votos_dis_cand, prep_votos_dis_tot) %>% ungroup() #ungroup importante
+colnames(prep_dis_presi) = c('entidad','distrito','candidato','votos','votos_t')
+
+#Usar votos totales por distrito, para obtener porcentaje de votos de cada candidato por entidad y distrito
+prep_dis_presi = mutate(prep_dis_presi, perc = (votos*100)/votos_t)
+
+#Realiza subconjunto con el porcentaje por entidad y distrito con maximo porcentaje. Luego une el nombre del candidato y selecciona solo tres columnas
+prep_dis_ganador = prep_dis_presi %>% 
+  group_by(entidad, distrito) %>%
+  summarise(perc = max(perc)) %>%
+  left_join(prep_dis_presi) %>% 
+  ungroup() %>%
+  select(entidad, distrito, candidato)
+
+colnames(prep_dis_ganador) = c('entidad', 'distrito', 'ganador')
+
+#une columna con candidato ganador distrital
+prep_dis_presi  = left_join(prep_dis_presi, prep_dis_ganador)
+
+#Transofrma
+lea_dis_presi = prep_dis_presi %>% select(entidad,distrito, candidato, ganador, votos_t, perc) %>% spread(candidato, perc)
+lea_dis_presi = left_join(lea_dis_presi, entidad_id)
+lea_dis_presi[,c(5:10)] = apply(lea_dis_presi[,c(5:10)], MARGIN = 2, function(x){round(x, digits = 3)})
+
+lea_dis_presi$porcentajes = paste(lea_dis_presi$nombre, '/',  'Distrito:', lea_dis_presi$distrito, 
+                                  ' AMLO:', lea_dis_presi$AMLO,'%; ', 'RAC:',lea_dis_presi$RAC, '%; ',
+                                  'JAMK:', lea_dis_presi$JAMK, '%; ', 'JHRC:', lea_dis_presi$JHRC, '%; ', 
+                                  'Sin registro:', lea_dis_presi$`NO REGISTRO`, '%; ', 'Nulos:', lea_dis_presi$NULOS, '%; ',
+                                  'Total votos:', lea_dis_presi$votos_t, sep = '')
+
+distr@data = distr_data_orig
+distr@data$entidad = as.numeric(as.character(distr@data$entidad))
+distr@data$distrito = as.numeric(as.character(distr@data$distrito))
+
+
+
+distr@data = left_join(distr@data, lea_dis_presi)
+
+
+#####
+#VOTOS POR CANDIDATO
+ent_votos = prep_presi %>% 
+  group_by(candidato) %>%
+  summarise(votos_e = sum(votos)) %>% 
+  ungroup() %>%
+  mutate(perc = (votos_e*100)/sum(votos_e))
+
+
+#####
+#HORAS
+
+hora_votos = prep_presi %>% select(FECHA_HORA_VERIFICACION, candidato, votos) %>%
+  filter(!str_detect(prep_presi$FECHA_HORA_VERIFICACION, '-$')) %>%
+  mutate(hora = ymd_hms(FECHA_HORA_VERIFICACION)) %>%
+  select(candidato:hora)
+
+hora_votos = na.omit(hora_votos)
+hora_votos = split(hora_votos, hora_votos$candidato)
+
+hora_votos = lapply(hora_votos, function(x){
+  b = arrange(x, hora)
+  b$acum = ave(b$votos, b$candidato, FUN = cumsum)
+  b
+  })
+
+hora_votos = bind_rows(hora_votos)
+
+#####reorder(partido,-votos),votos
+##GGplots
+gg_cand = ggplot(ent_votos, aes(reorder(candidato,-perc),perc))  + 
+  geom_col(aes(fill = candidato)) +
+  geom_text(aes(label = perc), stat = 'identity', vjust = 0, size = 3) +
+  theme_classic() + 
+  theme(legend.direction = "horizontal", 
+        legend.position = "bottom",
+        legend.box = "horizontal") +
+  labs(x = paste('Candidatos presidenciales.', 'Hora de ultima actualización:', Sys.time()),y = 'Porcentaje de votos %') +
+  scale_y_continuous(breaks = seq(1,60, 1)) +
+  scale_fill_manual(values = c('AMLO'= '#993333', 'NO REGISTRO'= '#CCCCCC', 'RAC'='#003366',
+                                'JHRC'= '#633176', 'JAMK'= '#339900', 'NULOS'= '#000000'))
+
+gg_hora = ggplot(hora_votos) + 
+  geom_line(aes(hora, acum, color = candidato)) +
+  scale_color_manual(values = c('AMLO'= '#993333', 'NO REGISTRO'= '#CCCCCC', 'RAC'='#003366',
+                                'JHRC'= '#633176', 'JAMK'= '#339900', 'NULOS'= '#000000')) +
+  theme_classic() + 
+  theme(legend.direction = "horizontal", 
+        legend.position = "bottom",
+        legend.box = "horizontal") +
+  labs(x = paste('Fecha y hora de registro de voto.', 'Hora de ultima actualización:', Sys.time()), y = '# Votos')
+
+#####
+#leaflet
+map_dist2018 = leaflet(distr) %>%
+  addProviderTiles(providers$OpenStreetMap.BlackAndWhite) %>%
+  addPolygons(layerId = ~entidad, popup = ~porcentajes,
+              color = ~(ifelse(distr@data$ganador ==  'AMLO', '#993333',
+                                      ifelse(distr@data$ganador ==  'NO REGISTRO', '#CCCCCC',
+                                             ifelse(distr@data$ganador ==  'RAC', '#003366',
+                                                    ifelse(distr@data$ganador ==  'JHRC', '#633176',
+                                                           ifelse(distr@data$ganador == 'JAMK', '#339900',
+                                                                  ifelse(distr@data$ganador == 'NULOS', '#FF0033','black'
+                                                                  ))))))),
+              weight = 3,
+              fillColor = ~(ifelse(distr@data$ganador ==  'AMLO', '#993333',
+                                   ifelse(distr@data$ganador ==  'NO REGISTRO', '#CCCCCC',
+                                          ifelse(distr@data$ganador ==  'RAC', '#003366',
+                                                 ifelse(distr@data$ganador ==  'JHRC', '#633176',
+                                                        ifelse(distr@data$ganador == 'JAMK', '#339900',
+                                                               ifelse(distr@data$ganador == 'NULOS', '#FF0033','black'
+                                                               ))))))),
+              popupOptions = popupOptions(maxWidth = 200, autoPan = T, closeButton = T, closeOnClick = T),
+              highlightOptions = highlightOptions(
+                color='#000000', opacity = .7, weight = 2, fillOpacity = 1,
+                bringToFront = TRUE, sendToBack = TRUE)
+              )
+
+saveWidget(map_dist2018, file="/home/pacheco/Documents/R/elecciones2018/share/map_dist2018.html")
+ggsave(gg_cand, filename = "/home/pacheco/Documents/R/elecciones2018/share/candidatos2018.jpg", width = 30, height = 20, units = 'cm')
+ggsave(gg_hora, filename = "/home/pacheco/Documents/R/elecciones2018/share/hora2018.jpg", width = 30, height = 20, units = 'cm')
+```
+
+
+<p> 
+
+</p>
+#### ¡Bienvenido a una visualización mas de las elecciones 2018!
+
+Las figuras que verás a continuación están siendo actualizadas conforme el avance del [PREP](https://dtq2018.ine.mx/#/descargaBase). La primera imagen es un *mapa interactivo* que muestra como votaron los distritos electorales establecidos por el INE. Las siguientes dos figuras corresponden al conteo general de los candidatos presidenciales. La *primera* muestra el procentaje total de votos obtenidoss y la *segunda* es el acumulado de votos por candidato conforme son registrados en el PREP.
+
+Siéntete libre de utilizarlas para tu sitio web, pero no te olvides de incluir la autoría y su fuente. Puedes encontrar sus ligas abajo. También puedes contacterme y encontrarme vía twitter como @[pachecovv](https://twitter.com/Pachecovv).
+
+También puedes visitar y recordar las elecciones del 2012 en [esta liga](https://datapach.com/2018/07/02/como_fueron_las_elecciones_presidenciales_2012/)
+
+_Esta página no es oficial y es un esfuerzo voluntario para una mayor difusión de información_
+
+```{r, out.width = '100%', echo=FALSE}
+map_dist2018 
+```
+
+
+```{r , echo=FALSE, fig.align='center'}
+gg_cand
+```
+
+```{r , echo=FALSE, fig.align='center'}
+gg_hora
+```
+
+Ligas: 
+[Mapa interactivo](http://rodpach.github.io/elecciones2018/share/map_dist2018.html)
+[Eleccion presidencial](http://rodpach.github.io/elecciones2018/share/candidatos2018.jpg)
+[Acumulado](http://rodpach.github.io/elecciones2018/share/hora2018.jpg)
